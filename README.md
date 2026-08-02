@@ -1,4 +1,4 @@
-# Rough-Bergomi-Model-Calibration-for-time-varying-Hurst-parameter
+# Rough Bergomi Model Calibration for time-varying Hurst parameter
 
 This repository contains the implementation and calibration of the Rough Bergomi model and its extensions, including a multifractional Rough Bergomi approach, using multifractional Brownian motion to drive volatility. The work was conducted as part of a thesis project focused on modeling stochastic volatility with roughness features and calibrating these models to market data.
 
