@@ -1245,7 +1245,7 @@ if __name__ == '__main__':
     # --- Load data ---
     spot_price, quote_date, final_surface_df, r_func, q_func = \
         prepare_full_surface_and_rates('UnderlyingOptionsEODCalcs_2026-07-28.csv',
-            constant_dividend_yield=0.0)
+            constant_dividend_yield=0.0115)
     if spot_price is None:
         exit()
         
@@ -1254,7 +1254,7 @@ if __name__ == '__main__':
     calib_df = create_calibration_grid(final_surface_df, spot_price, num_options=50)
     calibrator = rBergomi_Calibrator(calib_df, spot_price, r_func, q_func, xi_func)
 
-    calibrator.n_steps_per_year = 100
+    calibrator.n_steps_per_year = 
 
     ###########################################################################
     # 1. fBm baseline calibration
