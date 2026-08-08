@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Jul  7 14:23:14 2026
-
-@author: flori
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import quad
