@@ -887,7 +887,7 @@ def plot_single_maturity_smile(spot_price, full_surface_df, r_func, q_func, xi_f
     H, rho, eta = calib_params['H'], calib_params['rho'], calib_params['eta']
     
     # Increased paths for visualization to handle deep OTM options better
-    n_paths =  10 
+    n_paths =  250000 
     n_steps = max(50, int(100 * T_val))
     
     print(f"Starting high-precision simulation ({n_paths} paths, {n_steps} steps)...")
@@ -1007,7 +1007,7 @@ def plot_single_maturity_smile_mBm(spot_price, full_surface_df, r_func, q_func, 
     print(f"Closest maturity: {closest_T*365:.1f} days (T={T_val:.4f})")
 
     # --- Step 4: Simulate ---
-    n_paths = 10
+    n_paths = 250000
     n_steps = max(50, int(100 * T_val))
     print(f"Simulating {n_paths} paths, {n_steps} steps...")
 
@@ -1277,7 +1277,7 @@ def plot_model_vs_market_multi_maturity(
             eta=fbm_params['eta'], xi=xi_func(T),
             S0=spot_price, T=T,
             n_steps=max(20, int(100*T)),
-            n_paths=10, moneyness=moneyness_range,
+            n_paths=250000, moneyness=moneyness_range,
             r_func=r_func,     
             q_func=q_func      
         )
@@ -1289,7 +1289,7 @@ def plot_model_vs_market_multi_maturity(
         for (spec_label, spec_func, mbm_p), col in zip(mbm_params_list, colors):
             smile_mbm = generate_smile_mBm(
                 H_func=spec_func, rho=mbm_p['rho'], eta=mbm_p['eta'],
-                xi=xi_func(T), S0=spot_price, T=T, n_steps=max(20, int(100*T)), n_paths=10,
+                xi=xi_func(T), S0=spot_price, T=T, n_steps=max(20, int(100*T)), n_paths=250000,
                 moneyness=moneyness_range, r_func = r_func, q_func = q_func)
             
             ax.plot(moneyness_range, smile_mbm,
@@ -1445,8 +1445,8 @@ if __name__ == '__main__':
         cost_fn     = calibrator.cost_function_fBm,
         bounds      = bounds_fbm,
         spec_name   = "fBm constant H",
-        de_paths    = 1, 
-        slsqp_paths = 1 
+        de_paths    = 50000, 
+        slsqp_paths = 200000 
     )
     
     fbm_params = {
@@ -1535,8 +1535,8 @@ if __name__ == '__main__':
             cost_fn     = cost_fn,
             bounds      = spec['bounds'],
             spec_name   = spec['name'],
-            de_paths    = 1, 
-            slsqp_paths = 1) 
+            de_paths    = 50000, 
+            slsqp_paths = 200000) 
     
         shape_params = best.x[:-2]
         rho_cal      = best.x[-2]
