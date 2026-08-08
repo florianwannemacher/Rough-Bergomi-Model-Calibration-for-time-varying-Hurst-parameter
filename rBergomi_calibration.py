@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Jul 17 13:41:55 2026
-
-@author: flori
-"""
-
 import numpy as np
 import pandas as pd
 import time
@@ -16,7 +9,6 @@ from scipy.optimize import brentq, minimize, differential_evolution
 from scipy.interpolate import interp1d, PchipInterpolator
 from numpy.fft import rfft, irfft
 import heapq
-from Effects_of_H_eta_rho_on_implied_vol import *
 
 plt.rcParams.update({
     'text.usetex': False,
@@ -895,7 +887,7 @@ def plot_single_maturity_smile(spot_price, full_surface_df, r_func, q_func, xi_f
     H, rho, eta = calib_params['H'], calib_params['rho'], calib_params['eta']
     
     # Increased paths for visualization to handle deep OTM options better
-    n_paths =  250000 
+    n_paths =  10 
     n_steps = max(50, int(100 * T_val))
     
     print(f"Starting high-precision simulation ({n_paths} paths, {n_steps} steps)...")
@@ -1015,7 +1007,7 @@ def plot_single_maturity_smile_mBm(spot_price, full_surface_df, r_func, q_func, 
     print(f"Closest maturity: {closest_T*365:.1f} days (T={T_val:.4f})")
 
     # --- Step 4: Simulate ---
-    n_paths = 250000
+    n_paths = 10
     n_steps = max(50, int(100 * T_val))
     print(f"Simulating {n_paths} paths, {n_steps} steps...")
 
@@ -1060,6 +1052,189 @@ def plot_single_maturity_smile_mBm(spot_price, full_surface_df, r_func, q_func, 
     print(f"Saved: {filename}")
     plt.show()
     plt.close(fig)
+
+def _simulate_hybrid_components_mBm(H_func, n_steps, T):
+    """
+    Generates the core components for the Hybrid Scheme adapted for multifractional Brownian motion.
+    H is frozen at each grid point t_i, i.e. H_i = H_func(t_i). This follows the procedure outlined in 
+    Section 6.1.2 and is based on the implementation of the Hybrid Scheme for fractional Brownian motion, with 
+    the key changes being:
+        1. H_func replaces the scaler H
+        2. Covariance matrix Sigma_i is rebuilt at each step using H_i
+        3. The weights, b_k_star, are recomputed at each step using local alpha_i
+        4. sqrt(2*H) normalisation uses local H_i, i.e. sqrt(2*H_i)
+        5. W2 increments are drawn from locally adapted distribution
+    """
+    # --- Step 1: Set up core Parameters ---
+    dt = T / n_steps
+    t_grid = np.linspace(0, T, n_steps + 1)
+    
+    # Storage 
+    W1_increments = np.zeros(n_steps)
+    W2_increments = np.zeros(n_steps)
+    Y = np.zeros(n_steps + 1)
+    convolution_sum = np.zeros(n_steps)
+    
+    # --- Step 2: Draw correlated (W1_i, W2_i) at each grid point ---
+    # Covariance matrix Sigma_i depends on H_i = H_func(t_i) so it must be rebuilt at every step 
+
+    for i in range(n_steps):
+            t_i = t_grid[i + 1]
+            H_i = H_func(t_i)                                       
+            alpha_i = H_i - 0.5                                     
+    
+            # Local covariance matrix for step i                    
+            var_W1     = dt
+            var_W2     = dt ** (2 * H_i) / (2 * H_i)               
+            cov_W1_W2  = dt ** (H_i + 0.5) / (H_i + 0.5)          
+    
+            cov_matrix_i = np.array([                              
+                [var_W1,    cov_W1_W2],
+                [cov_W1_W2, var_W2   ]])
+    
+            # Draw one bivariate normal vector from local Sigma_i   
+            vec = np.random.multivariate_normal([0, 0], cov_matrix_i)
+            W1_increments[i] = vec[0]
+            W2_increments[i] = vec[1]    
+            
+    # --- Step 2: Convolution (memory / distant part) ---
+    # gamma_k also depends on alpha_i = H_func(t_i) - 0.5 so we build a time-varying convolution sum
+
+    for i in range(1, n_steps):
+        t_i    = t_grid[i + 1]
+        H_i    = H_func(t_i)                                  
+        alpha_i = H_i - 0.5                                    
+
+        n_steps_per_year = int(n_steps / T) if T > 0 else n_steps
+
+        # b_k_star weights use local alpha_i                  
+        k = np.arange(2, i + 2)
+        base    = (k ** (alpha_i + 1) - (k - 1) ** (alpha_i + 1)) / (alpha_i + 1)
+        b_k_star = np.abs(base) ** (1 / alpha_i)
+        coeffs  = (b_k_star / n_steps_per_year) ** alpha_i
+    
+        # Convolve against past W1 increments up to step i 
+        # coeffs[0] multiplies W1[i-1], coeffs[1] multiplies W1[i-2], etc.
+        past_W1 = W1_increments[:i][::-1]                      # reverse for convolution
+        length  = min(len(coeffs), len(past_W1))
+        convolution_sum[i] = np.dot(coeffs[:length], past_W1[:length])
+    
+    # --- Step 3: Assemble Y using local sqrt(2*H_i)         
+    for i in range(n_steps):
+        t_i = t_grid[i + 1]
+        H_i = H_func(t_i)                                      
+        Y[i + 1] = np.sqrt(2 * H_i) * (W2_increments[i] + convolution_sum[i])
+
+    return Y, W1_increments
+
+def simulate_rbergomi_path_mBm(H_func, rho, eta, xi, S0, T, n_steps):
+    """
+    Simulates a single price and volatility path for the multifractional rough Bergomi model with continuous H(t)
+    
+    Parameters:
+    -----------
+    H_func (callable): H:[0,T]->(0,0.5), the Hurst function
+    rho (float): leverage correlation
+    eta (float): volatility of volatility
+    xi (float): initial forward variance
+    S0 (float): initial stock price
+    T (float): time horizon
+    n_steps (int): number of time steps
+    """
+    
+    # Step 1: Generate Y and W1 using frozen-H hybrid scheme
+    Y_path, W1_increments = _simulate_hybrid_components_mBm(H_func, n_steps, T)
+
+    dt = T / n_steps
+    time_grid = np.linspace(0, T, n_steps + 1)
+    
+    # Step 2: Variance process with time-varying correction term
+    H_vals = np.array([H_func(t) for t in time_grid])         
+    correction = 0.5 * eta**2 * time_grid ** (2 * H_vals) 
+
+    variance_path = xi * np.exp(eta * Y_path - correction)
+    
+    # Step 3: Stock price — unchanged from fBm version
+    dW_perp = np.sqrt(dt) * np.random.randn(n_steps)
+    dB = rho * W1_increments + np.sqrt(1 - rho**2) * dW_perp
+
+    S_path = np.zeros(n_steps + 1)
+    S_path[0] = S0
+    V_t = np.maximum(variance_path[:-1], 1e-12)
+
+    log_increments = -0.5 * V_t * dt + np.sqrt(V_t) * dB
+    S_path[1:] = S0 * np.exp(np.cumsum(log_increments))
+
+    volatility_path = np.sqrt(variance_path)
+
+    return time_grid, S_path, volatility_path
+
+def generate_smile(H, rho, eta, xi, S0, T, n_steps, n_paths, moneyness, r_func=None, q_func=None):
+    """Generates a single implied volatility smile for a given set of rBergomi parameters."""
+    print(f"Starting simulation for H = {H:.2f}...")
+    start_time = time.time()
+    
+    # Wrap scalar xi as a callable for generate_paths
+    xi_func_wrap = lambda t: xi
+
+    # Use provided rate functions or default to zero
+    r_func_use = r_func if r_func is not None else lambda t: 0.0
+    q_func_use = q_func if q_func is not None else lambda t: 0.0
+
+    # Use r and q at maturity T for IV inversion
+    r_val = float(r_func_use(T)) 
+    q_val = float(q_func_use(T))
+    
+    model = rBergomi(n_steps=n_steps, T=T, H=H)
+    S_paths = model.generate_paths(n_paths, rho, eta, xi_func_wrap, S0, r_func_use, q_func_use)
+    S_T = S_paths[:, -1] # Get the terminal stock prices
+    
+    implied_vols = []
+    strike_range = moneyness * S0
+    
+    for K in strike_range:
+        # Use Out-of-the-Money (OTM) options to reduce estimator noise.
+        option_type = 'c' if K >= S0 else 'p'
+        
+        # Calculate the option price via Monte Carlo average of payoffs
+        model_price = np.mean(np.maximum(S_T - K, 0) if option_type == 'c' else np.maximum(K - S_T, 0))
+        
+        # Back out the implied volatility from the model price
+        iv = find_implied_vol(model_price, S0, K, T, r=r_val, q=q_val, flag=option_type)
+        implied_vols.append(iv)
+        
+    print(f"Finished H = {H:.2f} in {(time.time() - start_time):.2f} seconds.")
+    return implied_vols
+
+def generate_smile_mBm(H_func, rho, eta, xi, S0, T, n_steps, n_paths, moneyness, r_func=None, q_func=None):
+    """
+    Generates an implied volatility smile for the mBm rough Bergomi model.
+    Wraps simulate_mBm_rbergomi_path to collect terminal prices
+    across n_paths, then inverts Black-Scholes for each strike.
+    """
+    print(f"  Simulating {n_paths} paths for mBm...")
+    start = time.time()
+
+    # Collect terminal stock prices across all paths
+    S_T = np.zeros(n_paths)
+    for path_idx in range(n_paths):
+        _, S_path, _ = simulate_rbergomi_path_mBm(H_func = H_func, rho = rho, eta = eta, xi = xi,
+            S0 = S0, T = T, n_steps = n_steps)
+        S_T[path_idx] = S_path[-1]
+
+    # Use actual r and q if provided, otherwise 0
+    r_use = r_func(T) if r_func is not None else 0.0
+    q_use = q_func(T) if q_func is not None else 0.0
+
+    implied_vols = []
+    for K in moneyness * S0:
+        flag = 'c' if K >= S0 else 'p'
+        model_price = np.mean(np.maximum(S_T - K, 0) if flag == 'c' else np.maximum(K - S_T, 0))
+        iv = find_implied_vol(model_price, S0, K, T, r=r_use, q=q_use, flag=flag)
+        implied_vols.append(iv)
+
+    print(f"  Done in {time.time()-start:.1f}s")
+    return implied_vols
     
 def plot_model_vs_market_multi_maturity(
         spot_price, final_surface_df, r_func, q_func, xi_func,
@@ -1102,7 +1277,9 @@ def plot_model_vs_market_multi_maturity(
             eta=fbm_params['eta'], xi=xi_func(T),
             S0=spot_price, T=T,
             n_steps=max(20, int(100*T)),
-            n_paths=250000, moneyness=moneyness_range 
+            n_paths=10, moneyness=moneyness_range,
+            r_func=r_func,     
+            q_func=q_func      
         )
         ax.plot(moneyness_range, smile_fbm, 'b--',
                 lw=1.5, label=rf'fBm $H={H_fbm:.2f}$')
@@ -1112,7 +1289,7 @@ def plot_model_vs_market_multi_maturity(
         for (spec_label, spec_func, mbm_p), col in zip(mbm_params_list, colors):
             smile_mbm = generate_smile_mBm(
                 H_func=spec_func, rho=mbm_p['rho'], eta=mbm_p['eta'],
-                xi=xi_func(T), S0=spot_price, T=T, n_steps=max(20, int(100*T)), n_paths=250000,
+                xi=xi_func(T), S0=spot_price, T=T, n_steps=max(20, int(100*T)), n_paths=10,
                 moneyness=moneyness_range, r_func = r_func, q_func = q_func)
             
             ax.plot(moneyness_range, smile_mbm,
@@ -1254,7 +1431,7 @@ if __name__ == '__main__':
     calib_df = create_calibration_grid(final_surface_df, spot_price, num_options=50)
     calibrator = rBergomi_Calibrator(calib_df, spot_price, r_func, q_func, xi_func)
 
-    calibrator.n_steps_per_year = 
+    calibrator.n_steps_per_year = 100
 
     ###########################################################################
     # 1. fBm baseline calibration
@@ -1268,8 +1445,8 @@ if __name__ == '__main__':
         cost_fn     = calibrator.cost_function_fBm,
         bounds      = bounds_fbm,
         spec_name   = "fBm constant H",
-        de_paths    = 50000, 
-        slsqp_paths = 200000 
+        de_paths    = 1, 
+        slsqp_paths = 1 
     )
     
     fbm_params = {
@@ -1358,8 +1535,8 @@ if __name__ == '__main__':
             cost_fn     = cost_fn,
             bounds      = spec['bounds'],
             spec_name   = spec['name'],
-            de_paths    = 500, 
-            slsqp_paths = 200) 
+            de_paths    = 1, 
+            slsqp_paths = 1) 
     
         shape_params = best.x[:-2]
         rho_cal      = best.x[-2]
@@ -1393,7 +1570,7 @@ if __name__ == '__main__':
         
     ###########################################################################
     # 4. Plot multi-maturity comparison
-    ###########################################################################
+    ###########################################################################   
     
     mbm_params_list = [
         (res['label'], res['H_func'],
@@ -1414,6 +1591,24 @@ if __name__ == '__main__':
     ###########################################################################
     # 5. Plot MSE bar chart
     ###########################################################################
+    
+if __name__ == '__main__':
+
+    # --- Load data ---
+    spot_price, quote_date, final_surface_df, r_func, q_func = \
+        prepare_full_surface_and_rates('UnderlyingOptionsEODCalcs_2026-07-28.csv',
+            constant_dividend_yield=0.0115)
+    if spot_price is None:
+        exit()
+        
+    atm_curve_df = extract_atm_volatility_curve(final_surface_df, spot_price)
+    xi_func = create_xi_from_market_atm(atm_curve_df)
+    calib_df = create_calibration_grid(final_surface_df, spot_price, num_options=50)
+    calibrator = rBergomi_Calibrator(calib_df, spot_price, r_func, q_func, xi_func)
+
+    calibrator.n_steps_per_year = 100    
+
+    
     mse_results = {'fBm (const $H$)': fbm_params['MSE']}
     mse_results.update({name: res['MSE'] for name, res in mbm_results.items()})
     plot_mse_comparison(mse_results)
@@ -1461,6 +1656,7 @@ if __name__ == '__main__':
         print(f"{name:<25}|{res['MSE_DE']:<14.8f}"
               f"|{res['MSE_SLSQP']:<14.8f}|{winner:<8}")
     
+
 
 
 
