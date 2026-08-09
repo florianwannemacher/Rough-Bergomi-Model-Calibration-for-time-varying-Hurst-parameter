@@ -1592,23 +1592,6 @@ if __name__ == '__main__':
     # 5. Plot MSE bar chart
     ###########################################################################
     
-if __name__ == '__main__':
-
-    # --- Load data ---
-    spot_price, quote_date, final_surface_df, r_func, q_func = \
-        prepare_full_surface_and_rates('UnderlyingOptionsEODCalcs_2026-07-28.csv',
-            constant_dividend_yield=0.0115)
-    if spot_price is None:
-        exit()
-        
-    atm_curve_df = extract_atm_volatility_curve(final_surface_df, spot_price)
-    xi_func = create_xi_from_market_atm(atm_curve_df)
-    calib_df = create_calibration_grid(final_surface_df, spot_price, num_options=50)
-    calibrator = rBergomi_Calibrator(calib_df, spot_price, r_func, q_func, xi_func)
-
-    calibrator.n_steps_per_year = 100    
-
-    
     mse_results = {'fBm (const $H$)': fbm_params['MSE']}
     mse_results.update({name: res['MSE'] for name, res in mbm_results.items()})
     plot_mse_comparison(mse_results)
