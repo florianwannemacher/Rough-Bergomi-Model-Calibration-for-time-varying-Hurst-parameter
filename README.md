@@ -3,6 +3,7 @@
 This repository contains the implementation and calibration of the Rough Bergomi model and its extensions, including a multifractional Rough Bergomi approach, using multifractional Brownian motion to drive volatility. The work was conducted as part of a thesis project focused on modeling stochastic volatility with roughness features and calibrating these models to market data.
 
 # Repository Structure
+
 * `Cholesky_Decomposition.py` : Generates paths of multifractional Brownian motion using the Cholesky Decomposition method
 * `Implied Vol_multifractional_rBergomi.py` : Generates implied volatility smiles for different C^1 specifications of H(t) under the rough Bergomi framework
 * `Implied Vol_multifractional_rBergomi_polynomials.py` : Generates implied volatility smiles for different polynomial (up to degree 3) specifications of H(t) under the rough Bergomi framework
@@ -10,7 +11,10 @@ This repository contains the implementation and calibration of the Rough Bergomi
 * `Effects_of_H_eta_rho_on_implied_vol.py` : Extension of the rBergomi model to allow different C^1 specifications of H(t); effects of H(t), rho, eta on implied volatility smiles 
 * `rBergomi_calibration.py` : Calibration routines combining global optimization (DE) with local refinement (SLSQP).
 
+Note that when running the code the files `Effects_of_H_eta_rho_on_implied_vol.py` and `rBergomi_calibration.py` should be run together as some of the function from the `Effects_of_H_eta_rho_on_implied_vol.py` are required for `rBergomi_calibration.py`. At the current configuration running `rBergomi_calibration.py` will automatically also run `Effects_of_H_eta_rho_on_implied_vol.py`
+
 # Information
+
 * **Thesis Name:** Modeling Rough Volatility with Time-Varying Hurst Parameter in the Rough Bergomi Framework
 * **Author:** Florian Wannemacher
 * **Institution:** University of Edinburgh
