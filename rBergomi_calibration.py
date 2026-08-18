@@ -935,7 +935,7 @@ def plot_single_maturity_smile(spot_price, full_surface_df, r_func, q_func, xi_f
         'o-',
         color='royalblue',
         markersize=4,
-        label=r'\textrm{SPX Implied Volatility}'
+        label=r'SPX Implied Volatility'
     )
     
     # Filter out NaN model IVs (where MC price was 0 for Deep OTM options)
@@ -946,20 +946,20 @@ def plot_single_maturity_smile(spot_price, full_surface_df, r_func, q_func, xi_f
             valid_model_data['model_iv'],
             'x--',
             color='darkred',
-            label=rf'\textrm{{Rough Bergomi Implied Volatility}}'
+            label=rf'Rough Bergomi Implied Volatility'
         )
     else:
         print("Warning: No valid model volatilities to plot.")
 
     ax.set_title(
-        rf'\textrm{{SPX Implied Volatility and Rough Bergomi Smile (Maturity = {T_val * 365:.0f} days)}}'
+        rf'SPX Implied Volatility and Rough Bergomi Smile (Maturity = {T_val * 365:.0f} days)'
         '\n'
-        rf'\textrm{{Calibrated Parameters: }}'
+        rf'Calibrated Parameters: '
         rf'$H = {H:.4f},\ \rho = {rho:.4f},\ \eta = {eta:.4f}$'
     )
-    ax.set_xlabel(r'\textrm{Strike} (\% \textrm{of Forward})')
+    ax.set_xlabel(r'Moneyness $(K/F)$')
     ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
-    ax.set_ylabel(r'\textrm{Implied Volatility} $\sigma_{\mathrm{BS}}(K,T)$')
+    ax.set_ylabel(r'Implied Volatility $\sigma_{\mathrm{BS}}(K,T)$')
     ax.grid(True)
     ax.legend()
     plt.tight_layout()
