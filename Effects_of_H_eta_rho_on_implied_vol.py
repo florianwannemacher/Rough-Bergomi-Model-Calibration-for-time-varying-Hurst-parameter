@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jul  8 11:34:12 2026
+
+@author: flori
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -290,6 +297,36 @@ def generate_smile(H, rho, eta, xi, S0, T, n_steps, n_paths, moneyness):
     print(f"Finished H = {H:.2f} in {(time.time() - start_time):.2f} seconds.")
     return implied_vols
 
+def generate_smile_mBm(H_func, rho, eta, xi, S0, T, n_steps, n_paths, moneyness, r_func=None, q_func=None):
+    """
+    Generates an implied volatility smile for the mBm rough Bergomi model.
+    Wraps simulate_mBm_rbergomi_path to collect terminal prices
+    across n_paths, then inverts Black-Scholes for each strike.
+    """
+    print(f"  Simulating {n_paths} paths for mBm...")
+    start = time.time()
+
+    # Collect terminal stock prices across all paths
+    S_T = np.zeros(n_paths)
+    for path_idx in range(n_paths):
+        _, S_path, _ = simulate_rbergomi_path_mBm(H_func = H_func, rho = rho, eta = eta, xi = xi,
+            S0 = S0, T = T, n_steps = n_steps)
+        S_T[path_idx] = S_path[-1]
+
+    # Use actual r and q if provided, otherwise 0
+    r_use = r_func(T) if r_func is not None else 0.0
+    q_use = q_func(T) if q_func is not None else 0.0
+
+    implied_vols = []
+    for K in moneyness * S0:
+        flag = 'c' if K >= S0 else 'p'
+        model_price = np.mean(np.maximum(S_T - K, 0) if flag == 'c' else np.maximum(K - S_T, 0))
+        iv = find_implied_vol(model_price, S0, K, T, r=r_use, q=q_use, flag=flag)
+        implied_vols.append(iv)
+
+    print(f"  Done in {time.time()-start:.1f}s")
+    return implied_vols
+
 def approximate_skew(H, tau, rho, eta, sigma_bar):
     """
     Calculates the approximate ATM forward skew according to equation.
@@ -375,6 +412,182 @@ def calculate_atm_forward_skew_structure(H, rho, eta, xi, S0, maturity_grid, n_p
             skew_structure.append(np.nan) # Append NaN if implied vol calculation fails
             
     print(f"\nCalculation finished for H = {H:.2f}.")
+    return np.array(skew_structure)
+
+def _simulate_hybrid_components_mBm_vectorised(H_func, n_steps, T, n_paths):
+    """
+    Vectorised frozen-H hybrid scheme for mBm. Generates n_paths simultaneously rather than one at a time.
+    This function is a vectorised form of the function "_simulate_hybrid_components_mBm"
+    
+    Returns:
+        Y            : shape (n_paths, n_steps+1)
+        W1_increments: shape (n_paths, n_steps)
+    """
+    dt               = T / n_steps
+    t_grid           = np.linspace(0, T, n_steps + 1)
+    n_steps_per_year = int(n_steps / T) if T > 0 else n_steps
+
+    # Storage — all paths at once
+    W1_increments   = np.zeros((n_paths, n_steps))
+    W2_increments   = np.zeros((n_paths, n_steps))
+    convolution_sum = np.zeros((n_paths, n_steps))
+    Y               = np.zeros((n_paths, n_steps + 1))
+
+    # --- Step 1: Draw (W1_i, W2_i) for all paths at each step ---
+    # n_paths draws from bivariate normal — one matrix multiply per step
+    for i in range(n_steps):
+        t_i       = t_grid[i + 1]
+        H_i       = H_func(t_i)
+        var_W1    = dt
+        var_W2    = dt ** (2 * H_i) / (2 * H_i)
+        cov_W1_W2 = dt ** (H_i + 0.5) / (H_i + 0.5)
+        cov_mat   = np.array([[var_W1, cov_W1_W2],
+                               [cov_W1_W2, var_W2]])
+
+        # Draw n_paths bivariate normals at once        # <-- KEY CHANGE
+        vecs = np.random.multivariate_normal(
+            [0, 0], cov_mat, size=n_paths
+        )
+        W1_increments[:, i] = vecs[:, 0]
+        W2_increments[:, i] = vecs[:, 1]
+
+    # --- Step 2: Convolution — vectorised dot product across paths ---
+    for i in range(1, n_steps):
+        t_i     = t_grid[i + 1]
+        H_i     = H_func(t_i)
+        alpha_i = H_i - 0.5
+
+        k        = np.arange(2, i + 2)
+        base     = (k ** (alpha_i+1) - (k-1) ** (alpha_i+1)) / (alpha_i+1)
+        b_k_star = np.abs(base) ** (1 / alpha_i)
+        coeffs   = (b_k_star / n_steps_per_year) ** alpha_i  # shape (i,)
+
+        past_W1 = W1_increments[:, :i][:, ::-1]  # shape (n_paths, i)
+        length  = min(len(coeffs), past_W1.shape[1])
+
+        # Matrix-vector product: (n_paths, length) @ (length,) -> (n_paths,)
+        convolution_sum[:, i] = past_W1[:, :length] @ coeffs[:length]
+
+    # --- Step 3: Assemble Y ---
+    for i in range(n_steps):
+        H_i = H_func(t_grid[i + 1])
+        Y[:, i + 1] = np.sqrt(2 * H_i) * (
+            W2_increments[:, i] + convolution_sum[:, i]
+        )
+
+    return Y, W1_increments
+
+def simulate_rbergomi_paths_mBm_batch(H_func, rho, eta, xi, S0, T,
+                                       n_steps, n_paths):
+    """
+    Simulates n_paths simultaneously for the mBm rough Bergomi model.
+    Returns terminal stock prices S_T of shape (n_paths,).
+    """
+    Y_paths, W1_inc = _simulate_hybrid_components_mBm_vectorised(
+        H_func, n_steps, T, n_paths
+    )
+    dt        = T / n_steps
+    time_grid = np.linspace(0, T, n_steps + 1)
+
+    # Time-varying Ito correction
+    H_vals     = np.array([H_func(t) for t in time_grid])
+    correction = 0.5 * eta**2 * time_grid ** (2 * H_vals)  # shape (n_steps+1,)
+
+    # Variance process — shape (n_paths, n_steps+1)
+    V = xi * np.exp(eta * Y_paths - correction[np.newaxis, :])
+
+    # Stock price
+    dW_perp = np.sqrt(dt) * np.random.randn(n_paths, n_steps)
+    dB      = rho * W1_inc + np.sqrt(1 - rho**2) * dW_perp
+
+    V_t            = np.maximum(V[:, :-1], 1e-12)
+    log_increments = -0.5 * V_t * dt + np.sqrt(V_t) * dB
+    log_S_T        = np.log(S0) + np.sum(log_increments, axis=1)
+
+    return np.exp(log_S_T)
+
+def calculate_atm_forward_skew_structure_mBm_fast(H_func, rho, eta, xi, S0, maturity_grid, n_paths_skew):
+    """
+    Fast ATM skew term structure for mBm using vectorised batch simulation.
+    """
+    print("  Computing mBm skew term structure (vectorised)...")
+    skew_structure = []
+    epsilon        = 0.001
+    n_maturities   = len(maturity_grid)
+
+    for i, T in enumerate(maturity_grid):
+        print(f"\r    Maturity {i+1}/{n_maturities} (T={T:.2f})...", end="")
+        n_steps = int(252 * T)
+        if n_steps == 0:
+            skew_structure.append(np.nan)
+            continue
+
+        K_up   = S0 * (1 + epsilon)
+        K_down = S0 * (1 - epsilon)
+
+        # All n_paths in one call                       
+        S_T = simulate_rbergomi_paths_mBm_batch(
+            H_func, rho, eta, xi, S0, T, n_steps, n_paths_skew
+        )
+
+        price_up   = np.mean(np.maximum(S_T - K_up,   0))
+        price_down = np.mean(np.maximum(S_T - K_down, 0))
+
+        iv_up   = find_implied_vol(price_up,   S0, K_up,   T, 0, 0, 'c')
+        iv_down = find_implied_vol(price_down, S0, K_down, T, 0, 0, 'c')
+
+        if iv_up is not None and iv_down is not None:
+            skew = abs(
+                (iv_up - iv_down)
+                / (np.log(K_up / S0) - np.log(K_down / S0))
+            )
+            skew_structure.append(skew)
+        else:
+            skew_structure.append(np.nan)
+
+    print()
+    return np.array(skew_structure)
+
+def calculate_atm_forward_skew_structure_mBm(H_func, rho, eta, xi, S0, maturity_grid, n_paths_skew):
+    """
+    ATM forward skew term structure for the mBm rough Bergomi model.
+    Identical logic to calculate_atm_forward_skew_structure but uses
+    simulate_mBm_rbergomi_path as the simulation engine.
+    """
+    print(f"  Computing mBm skew term structure...")
+    skew_structure = []
+    epsilon = 0.001
+    n_maturities = len(maturity_grid)
+
+    for i, T in enumerate(maturity_grid):
+        print(f"\r    Maturity {i+1}/{n_maturities} (T={T:.2f})...", end="")
+        n_steps = int(252 * T)
+        if n_steps == 0:
+            skew_structure.append(np.nan)
+            continue
+
+        K_up   = S0 * (1 + epsilon)
+        K_down = S0 * (1 - epsilon)
+
+        # Collect terminal prices
+        S_T = np.zeros(n_paths_skew)
+        for j in range(n_paths_skew):
+            _, S_path, _ = simulate_rbergomi_path_mBm(H_func=H_func, rho=rho, eta=eta, xi=xi, S0=S0, T=T, n_steps=n_steps)
+            S_T[j] = S_path[-1]
+
+        price_up   = np.mean(np.maximum(S_T - K_up,   0))
+        price_down = np.mean(np.maximum(S_T - K_down, 0))
+
+        iv_up   = find_implied_vol(price_up,   S0, K_up,   T, 0, 0, 'c')
+        iv_down = find_implied_vol(price_down, S0, K_down, T, 0, 0, 'c')
+
+        if iv_up is not None and iv_down is not None:
+            skew = abs((iv_up - iv_down) / (np.log(K_up / S0) - np.log(K_down / S0)))
+            skew_structure.append(skew)
+        else:
+            skew_structure.append(np.nan)
+
+    print()
     return np.array(skew_structure)
 
 ###############################################################################
@@ -496,36 +709,6 @@ for H_val in H_values:
 
 # Step 2: Simulate mBm smiles 
 print("Simulating mBm time-varying H(t) smiles...")
-
-def generate_smile_mBm(H_func, rho, eta, xi, S0, T, n_steps, n_paths, moneyness, r_func=None, q_func=None):
-    """
-    Generates an implied volatility smile for the mBm rough Bergomi model.
-    Wraps simulate_mBm_rbergomi_path to collect terminal prices
-    across n_paths, then inverts Black-Scholes for each strike.
-    """
-    print(f"  Simulating {n_paths} paths for mBm...")
-    start = time.time()
-
-    # Collect terminal stock prices across all paths
-    S_T = np.zeros(n_paths)
-    for path_idx in range(n_paths):
-        _, S_path, _ = simulate_rbergomi_path_mBm(H_func = H_func, rho = rho, eta = eta, xi = xi,
-            S0 = S0, T = T, n_steps = n_steps)
-        S_T[path_idx] = S_path[-1]
-
-    # Use actual r and q if provided, otherwise 0
-    r_use = r_func(T) if r_func is not None else 0.0
-    q_use = q_func(T) if q_func is not None else 0.0
-
-    implied_vols = []
-    for K in moneyness * S0:
-        flag = 'c' if K >= S0 else 'p'
-        model_price = np.mean(np.maximum(S_T - K, 0) if flag == 'c' else np.maximum(K - S_T, 0))
-        iv = find_implied_vol(model_price, S0, K, T, r=r_use, q=q_use, flag=flag)
-        implied_vols.append(iv)
-
-    print(f"  Done in {time.time()-start:.1f}s")
-    return implied_vols
 
 all_smiles_mBm = {}
 for spec in H_specs_mBm:
@@ -894,182 +1077,6 @@ H_specs_mBm = [
     },
 ]
 
-def _simulate_hybrid_components_mBm_vectorised(H_func, n_steps, T, n_paths):
-    """
-    Vectorised frozen-H hybrid scheme for mBm. Generates n_paths simultaneously rather than one at a time.
-    This function is a vectorised form of the function "_simulate_hybrid_components_mBm"
-    
-    Returns:
-        Y            : shape (n_paths, n_steps+1)
-        W1_increments: shape (n_paths, n_steps)
-    """
-    dt               = T / n_steps
-    t_grid           = np.linspace(0, T, n_steps + 1)
-    n_steps_per_year = int(n_steps / T) if T > 0 else n_steps
-
-    # Storage — all paths at once
-    W1_increments   = np.zeros((n_paths, n_steps))
-    W2_increments   = np.zeros((n_paths, n_steps))
-    convolution_sum = np.zeros((n_paths, n_steps))
-    Y               = np.zeros((n_paths, n_steps + 1))
-
-    # --- Step 1: Draw (W1_i, W2_i) for all paths at each step ---
-    # n_paths draws from bivariate normal — one matrix multiply per step
-    for i in range(n_steps):
-        t_i       = t_grid[i + 1]
-        H_i       = H_func(t_i)
-        var_W1    = dt
-        var_W2    = dt ** (2 * H_i) / (2 * H_i)
-        cov_W1_W2 = dt ** (H_i + 0.5) / (H_i + 0.5)
-        cov_mat   = np.array([[var_W1, cov_W1_W2],
-                               [cov_W1_W2, var_W2]])
-
-        # Draw n_paths bivariate normals at once        # <-- KEY CHANGE
-        vecs = np.random.multivariate_normal(
-            [0, 0], cov_mat, size=n_paths
-        )
-        W1_increments[:, i] = vecs[:, 0]
-        W2_increments[:, i] = vecs[:, 1]
-
-    # --- Step 2: Convolution — vectorised dot product across paths ---
-    for i in range(1, n_steps):
-        t_i     = t_grid[i + 1]
-        H_i     = H_func(t_i)
-        alpha_i = H_i - 0.5
-
-        k        = np.arange(2, i + 2)
-        base     = (k ** (alpha_i+1) - (k-1) ** (alpha_i+1)) / (alpha_i+1)
-        b_k_star = np.abs(base) ** (1 / alpha_i)
-        coeffs   = (b_k_star / n_steps_per_year) ** alpha_i  # shape (i,)
-
-        past_W1 = W1_increments[:, :i][:, ::-1]  # shape (n_paths, i)
-        length  = min(len(coeffs), past_W1.shape[1])
-
-        # Matrix-vector product: (n_paths, length) @ (length,) -> (n_paths,)
-        convolution_sum[:, i] = past_W1[:, :length] @ coeffs[:length]
-
-    # --- Step 3: Assemble Y ---
-    for i in range(n_steps):
-        H_i = H_func(t_grid[i + 1])
-        Y[:, i + 1] = np.sqrt(2 * H_i) * (
-            W2_increments[:, i] + convolution_sum[:, i]
-        )
-
-    return Y, W1_increments
-
-def simulate_rbergomi_paths_mBm_batch(H_func, rho, eta, xi, S0, T,
-                                       n_steps, n_paths):
-    """
-    Simulates n_paths simultaneously for the mBm rough Bergomi model.
-    Returns terminal stock prices S_T of shape (n_paths,).
-    """
-    Y_paths, W1_inc = _simulate_hybrid_components_mBm_vectorised(
-        H_func, n_steps, T, n_paths
-    )
-    dt        = T / n_steps
-    time_grid = np.linspace(0, T, n_steps + 1)
-
-    # Time-varying Ito correction
-    H_vals     = np.array([H_func(t) for t in time_grid])
-    correction = 0.5 * eta**2 * time_grid ** (2 * H_vals)  # shape (n_steps+1,)
-
-    # Variance process — shape (n_paths, n_steps+1)
-    V = xi * np.exp(eta * Y_paths - correction[np.newaxis, :])
-
-    # Stock price
-    dW_perp = np.sqrt(dt) * np.random.randn(n_paths, n_steps)
-    dB      = rho * W1_inc + np.sqrt(1 - rho**2) * dW_perp
-
-    V_t            = np.maximum(V[:, :-1], 1e-12)
-    log_increments = -0.5 * V_t * dt + np.sqrt(V_t) * dB
-    log_S_T        = np.log(S0) + np.sum(log_increments, axis=1)
-
-    return np.exp(log_S_T)
-
-def calculate_atm_forward_skew_structure_mBm_fast(H_func, rho, eta, xi, S0, maturity_grid, n_paths_skew):
-    """
-    Fast ATM skew term structure for mBm using vectorised batch simulation.
-    """
-    print("  Computing mBm skew term structure (vectorised)...")
-    skew_structure = []
-    epsilon        = 0.001
-    n_maturities   = len(maturity_grid)
-
-    for i, T in enumerate(maturity_grid):
-        print(f"\r    Maturity {i+1}/{n_maturities} (T={T:.2f})...", end="")
-        n_steps = int(252 * T)
-        if n_steps == 0:
-            skew_structure.append(np.nan)
-            continue
-
-        K_up   = S0 * (1 + epsilon)
-        K_down = S0 * (1 - epsilon)
-
-        # All n_paths in one call                       
-        S_T = simulate_rbergomi_paths_mBm_batch(
-            H_func, rho, eta, xi, S0, T, n_steps, n_paths_skew
-        )
-
-        price_up   = np.mean(np.maximum(S_T - K_up,   0))
-        price_down = np.mean(np.maximum(S_T - K_down, 0))
-
-        iv_up   = find_implied_vol(price_up,   S0, K_up,   T, 0, 0, 'c')
-        iv_down = find_implied_vol(price_down, S0, K_down, T, 0, 0, 'c')
-
-        if iv_up is not None and iv_down is not None:
-            skew = abs(
-                (iv_up - iv_down)
-                / (np.log(K_up / S0) - np.log(K_down / S0))
-            )
-            skew_structure.append(skew)
-        else:
-            skew_structure.append(np.nan)
-
-    print()
-    return np.array(skew_structure)
-
-def calculate_atm_forward_skew_structure_mBm(H_func, rho, eta, xi, S0, maturity_grid, n_paths_skew):
-    """
-    ATM forward skew term structure for the mBm rough Bergomi model.
-    Identical logic to calculate_atm_forward_skew_structure but uses
-    simulate_mBm_rbergomi_path as the simulation engine.
-    """
-    print(f"  Computing mBm skew term structure...")
-    skew_structure = []
-    epsilon = 0.001
-    n_maturities = len(maturity_grid)
-
-    for i, T in enumerate(maturity_grid):
-        print(f"\r    Maturity {i+1}/{n_maturities} (T={T:.2f})...", end="")
-        n_steps = int(252 * T)
-        if n_steps == 0:
-            skew_structure.append(np.nan)
-            continue
-
-        K_up   = S0 * (1 + epsilon)
-        K_down = S0 * (1 - epsilon)
-
-        # Collect terminal prices
-        S_T = np.zeros(n_paths_skew)
-        for j in range(n_paths_skew):
-            _, S_path, _ = simulate_rbergomi_path_mBm(H_func=H_func, rho=rho, eta=eta, xi=xi, S0=S0, T=T, n_steps=n_steps)
-            S_T[j] = S_path[-1]
-
-        price_up   = np.mean(np.maximum(S_T - K_up,   0))
-        price_down = np.mean(np.maximum(S_T - K_down, 0))
-
-        iv_up   = find_implied_vol(price_up,   S0, K_up,   T, 0, 0, 'c')
-        iv_down = find_implied_vol(price_down, S0, K_down, T, 0, 0, 'c')
-
-        if iv_up is not None and iv_down is not None:
-            skew = abs((iv_up - iv_down) / (np.log(K_up / S0) - np.log(K_down / S0)))
-            skew_structure.append(skew)
-        else:
-            skew_structure.append(np.nan)
-
-    print()
-    return np.array(skew_structure)
-
 ###############################################################################
 # Analysis 1: Constant H 
 ###############################################################################
@@ -1088,7 +1095,6 @@ n_paths_skew_1  = 250000
 H_values_2      = [0.02, 0.04, 0.06, 0.08, 0.10]
 colors_2        = ['darkred', 'red', 'orangered', 'orange', 'gold']
 n_paths_skew_2  = 250000
-
 
 all_skews_1 = {}
 total_start_time_1 = time.time()
@@ -1153,7 +1159,6 @@ S0_fixed             = 1.0
 maturity_grid        = np.linspace(0.05, 5, 50)
 colors_3        = ['blue', 'darkred', 'purple', 'green', 'gold']
 n_paths_skew_3  = 250000
-
 
 # mBm H(t)
 all_skews_mBm = {}
@@ -1402,7 +1407,6 @@ plt.ylabel(f'Implied Volatility $\\sigma_{{BS}}(K, T={common_params["T"]})$', fo
 plt.legend(title=r'Correlation $\rho$')
 plt.grid(True)
 
-
 # --- Plot (b): Different eta ---
 # This block shows the effect of varying the volatility-of-volatility parameter eta.
 # Eta primarily controls the curvature (smile) of the volatility surface.
@@ -1423,7 +1427,6 @@ for i, eta_val in enumerate(eta_values):
         S0=common_params['S0'], T=common_params['T'], n_steps=n_steps, 
         n_paths=common_params['n_paths'], moneyness=moneyness_range_b)
     plt.plot(moneyness_range_b, implied_vols, label=f'$\\eta={eta_val:.2f}$', color=colors_b[i])
-
 
 plt.title(f"Implied Volatility Smiles for Different $\\eta$; T={common_params['T']} years, $\\xi={common_params['xi']}$, $\\rho={rho_fixed_b}$, H={common_params['H']}", fontsize=12)
 plt.xlabel(r'Moneyness $(K/F)$', fontsize=10)
@@ -1490,6 +1493,7 @@ if __name__ == '__main__':
     print("Plot saved successfully as 'smiles_fixed_product.png'")
     plt.show()
     plt.close()
+    
     
     
 
